@@ -138,6 +138,7 @@ my $opt_format = {
 	test		=> [ 1, "test|t!", 'Recording', '--test, -t', "Test only - no recording (will show programme type)"],
 	thumb		=> [ 1, "thumb|thumbnail!", 'Recording', '--thumb', "Download Thumbnail image if available"],
 	thumbonly	=> [ 1, "thumbonly|thumbnailonly|thumbnail-only|thumb-only!", 'Recording', '--thumbnail-only', "Only Download Thumbnail image if available, not the programme"],
+	m4a         => [ 1, "m4a", 'Recording', '--m4a', "Convert aac audio to m4a with mp4box"],
 
 	# Search
 	before		=> [ 1, "before=n", 'Search', '--before', "Limit search to programmes added to the cache before N hours ago"],
@@ -238,6 +239,7 @@ my $opt_format = {
 	atomicparsley	=> [ 1, "atomicparsley|atomic-parsley=s", 'External Program', '--atomicparsley <path>', "Location of AtomicParsley tagger binary"],
 	id3v2		=> [ 1, "id3tag|id3v2=s", 'External Program', '--id3v2 <path>', "Location of id3v2 or id3tag binary"],
 	mplayer		=> [ 1, "mplayer=s", 'External Program', '--mplayer <path>', "Location of mplayer binary"],
+	mp4box		=> [ 1, "mp4box=s", 'External Program', '--mp4box <path>', "Location of mp4box binary"],
 
 	# Deprecated
 
@@ -672,7 +674,12 @@ sub init_search {
 	push @{ $binopts->{flvstreamer} }, ( '--timeout', 10 );
 	push @{ $binopts->{flvstreamer}	}, '--quiet' if $opt->{quiet};
 	push @{ $binopts->{flvstreamer}	}, '--verbose' if $opt->{verbose};
-	push @{ $binopts->{flvstreamer}	}, '--debug' if $opt->{debug};
+	#push @{ $binopts->{flvstreamer}	}, '--debug' if $opt->{debug};
+
+	# MP4Box for converting aac files to m4a format
+	$bin->{mp4box}		= $opt->{mp4box} || 'mp4box';
+	push @{ $binopts->{mp4box}	}, '-q' if $opt->{quiet};
+	push @{ $binopts->{mp4box}	}, '-v' if $opt->{verbose};
 
 	# quote binaries which allows for spaces in the path (only required if used via a shell)
 	for ( $bin->{lame}, $bin->{tee} ) {
@@ -4202,7 +4209,12 @@ sub mode_ver_download_retry_loop {
 				main::logger "\n";
 				if ( ! $opt->{nowrite} ) {
 					$hist->add( $prog );
-					$prog->tag_file;
+					# mp4box for m4a encapsulation of aac
+					if ( $opt->{m4a} ) {
+						$prog->encapsulate_as_m4a();
+					} else {
+						$prog->tag_file;
+					}
 				}
 				if ( $opt->{thumb} ) {
 					$prog->create_dir();
@@ -4247,7 +4259,7 @@ sub tag_file {
 	# Return if file does not exist
 	return if ! -f $prog->{filename};
 
-	if ( $prog->{filename} =~ /\.(aac|mp3|m4a)$/i ) {
+	if ( $prog->{filename} =~ /\.(aac|mp3)$/i ) {
 		# Create ID3 tagging options for external tagger program (escape " for shell)
 		my ( $id3_name, $id3_episode, $id3_desc, $id3_channel ) = ( $prog->{name}, $prog->{episode}, $prog->{desc}, $prog->{channel} );
 		s|"|\\"|g for ($id3_name, $id3_episode, $id3_desc, $id3_channel);
@@ -4271,7 +4283,7 @@ sub tag_file {
 			main::logger "WARNING: Cannot tag $prog->{ext} file\n" if $opt->{verbose};
 		}
 
-	} elsif ( $prog->{filename} =~ /\.(mp4|m4v)$/i ) {
+	} elsif ( $prog->{filename} =~ /\.(mp4|m4v|m4a)$/i ) {
 		# Create mp4 tagging options for external tagging program.
 		my $tags;
 		for my $tag ( keys %{$prog} ) {
@@ -4305,9 +4317,15 @@ sub tag_file {
 			$tags->{guidance} = 'clean';
 			$tags->{guidance} = 'explicit' if $prog->{guidance};
 
+			my $stik;
+			
 			# Show type
-			my $stik = 'TV Show';
-			$stik = 'Movie' if $tags->{categories} =~ m{(film|movie)}i;
+			if ( $prog->{filename} =~ /\.(mp4|m4v)$/i ) {
+				$stik = 'TV Show';
+				$stik = 'Movie' if $tags->{categories} =~ m{(film|movie)}i;
+			} else {
+				$stik = 'Normal';
+			}
 
 			# Strip series and episode text from name, longname, episode
 			for my $tag ( qw/name longname episode/ ) {
@@ -4320,26 +4338,31 @@ sub tag_file {
 			# Build the command
 			my @cmd = (
 				$bin->{atomicparsley}, $prog->{filename},
-				'--TVNetwork',	$tags->{channel},
 				'--description',$tags->{descshort},
 				'--comment',	$tags->{descshort},
 				'--title',	$title,
-				'--TVShowName',	$tags->{longname},
-				'--TVEpisode',	$tags->{pid},
 				'--artist',	$tags->{name},
 				'--year',	$tags->{firstbcast},
-				'--advisory',	$tags->{guidance},
 				'--genre',	$tags->{categories},
 				'--stik',	$stik,
 				'--overWrite',	# Saves temp files being left around.
 			);
+			
+			# Add the correct flags for video vs audio
+			if ( $prog->{filename} =~ /\.(mp4|m4v)$/i ) {
+				# Add the series and episode numbers if they are defined
+				push @cmd, "--TVSeasonNum", $prog->{seriesnum} if $prog->{seriesnum};
+				push @cmd, "--TVEpisodeNum", $prog->{episodenum} if $prog->{episodenum};
+				push @cmd, "--TVNetwork", $tags->{channel};
+				push @cmd, "--TVShowName", $tags->{longname};
+				push @cmd, "--TVEpisode", $tags->{pid};
+				push @cmd, "--advisory",	$tags->{guidance};
+			} else {
+				push @cmd, "--album", $prog->{name};
+			}
 
 			# Add the thumbnail if one was downloaded
 			push @cmd, "--artwork", $prog->{thumbfile} if -f $prog->{thumbfile};
-
-			# Add the series and episode numbers if they are defined
-			push @cmd, "--TVSeasonNum", $prog->{seriesnum} if $prog->{seriesnum};
-			push @cmd, "--TVEpisodeNum", $prog->{episodenum} if $prog->{episodenum};
 
 			# time of recording - this messes up iTunes somewhat
 			#push @cmd, "--purchaseDate", "$prog->{dldate}T$prog->{dltime}Z" if $prog->{dldate} && $prog->{dltime};
@@ -4680,7 +4703,34 @@ sub generate_filenames {
 	return 0;
 }
 
-
+sub encapsulate_as_m4a {
+	my $prog = shift;
+	
+	# Use mp4box to convert to an m4a
+	
+	my $file_tmp = "$prog->{dir}/$prog->{fileprefix}.m4a";
+	
+	my @cmd = (
+		$bin->{mp4box},
+		@{ $binopts->{mp4box} },
+		'-add', $prog->{filename}.':mpeg4',
+		'-sbr', '-ipod',
+		$file_tmp
+	);
+	
+	# Now run the command
+	my $return = main::run_cmd( 'STDERR', @cmd );
+	if ( (! $return) && -f $file_tmp && stat($file_tmp)->size > $prog->min_download_size() ) {
+		unlink( $prog->{filename} );
+		$prog->{filename} = $file_tmp;
+		$prog->{ext} = "m4a";
+		$prog->tag_file;
+	# If the mp4box conversion failed, remove the failed-converted file attempt
+	} else {
+		main::logger "WARNING: mp4box failed\n";
+		unlink( $file_tmp );
+	}
+}
 
 # Run a user specified command
 # e.g. --command 'echo "<pid> <name> recorded"'
@@ -4698,7 +4748,7 @@ sub run_user_command {
 	
 	main::logger "ERROR: Command Exit Code: $exit_value\n" if $exit_value;
 	main::logger "INFO: Command succeeded\n" if $opt->{verbose} && ! $exit_value;
-        return 0;
+	return 0;
 }
 
 
@@ -8139,7 +8189,6 @@ sub get {
 		);
 	}
 
-
 	# Run flv conversion and delete source file on success
 	my $return = main::run_cmd( 'STDERR', @cmd );
 	if ( (! $return) && -f $prog->{filepart} && stat($prog->{filepart})->size > $prog->min_download_size() ) {
@@ -8152,6 +8201,7 @@ sub get {
 		$prog->{filepart} = $file_tmp;
 		$prog->{filename} = $file_tmp;
 	}
+	
 	# Moving file into place as complete (if not stdout)
 	move($prog->{filepart}, $prog->{filename}) if $prog->{filepart} ne $prog->{filename} && ! $opt->{stdout};
 	
