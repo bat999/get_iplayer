@@ -4210,7 +4210,7 @@ sub mode_ver_download_retry_loop {
 				if ( ! $opt->{nowrite} ) {
 					$hist->add( $prog );
 					# mp4box for m4a encapsulation of aac
-					if ( $opt->{m4a} ) {
+					if ( $opt->{m4a} && $mode =~ /aac/ ) {
 						$prog->encapsulate_as_m4a();
 					} else {
 						$prog->tag_file;
@@ -6926,6 +6926,11 @@ sub download {
 	if ( $mode =~ /^flash/ && ! main::exists_in_path('ffmpeg')) {
 		main::logger "\nWARNING: ffmpeg does not exist - not converting flv file\n";
 		$opt->{raw} = 1;
+	}
+	# Do not attempt to remux aac as m4a with mp4box if it's not present
+	if ( $opt->{m4a} && ! main::exists_in_path('mp4box')) {
+		main::logger "\nWARNING: mp4box does not exist - not converting to m4a\n";
+		delete $opt->{m4a};
 	}
 
 	# Get extension from streamdata if defined and raw not specified
